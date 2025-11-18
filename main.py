@@ -1,15 +1,18 @@
 import torch
-import torchvision
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torchvision import datasets, transforms
+import torchvision
+from torchvision import transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.autograd import Function
 
-
 DOWNLOAD_DATA = True
+
+
+# -------------------------
+# Gradient Reversal Layer
+# -------------------------
 
 class GradReverse(Function):
     @staticmethod
@@ -21,14 +24,19 @@ class GradReverse(Function):
     def backward(ctx, grad_output):
         return -ctx.lambd * grad_output, None  # reverse gradient
 
+
 def grad_reverse(x, lambd=1.0):
     return GradReverse.apply(x, lambd)
 
 
+# -------------------------
+# Model: feature extractor + two heads
+# -------------------------
+
 class Model(nn.Module):
-    def __init__(self, lambd_grl):
+    def __init__(self):
         super(Model, self).__init__()
-        # shared feature extractor
+        # shared feature extractor (for 1-channel 32x32)
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
         self.dropout1 = nn.Dropout(0.25)
@@ -44,8 +52,6 @@ class Model(nn.Module):
 
         self.dropout2 = nn.Dropout(0.5)
 
-        self.lambd_grl = lambd_grl 
-
     def extract_features(self, x):
         x = self.conv1(x)
         x = F.relu(x)
@@ -58,9 +64,9 @@ class Model(nn.Module):
         x = F.relu(x)
         return x
 
-    def forward(self, x):
+    def forward(self, x, lambd_grl=0.0):
         """
-        lambd_grl = 0.0  → no gradient reversal (baseline / simple domain confusion by -loss)
+        lambd_grl = 0.0  → no gradient reversal (baseline / domain confusion via -loss)
         lambd_grl > 0.0  → use gradient reversal for the domain head
         """
         features = self.extract_features(x)       # shared features [B, 128]
@@ -70,7 +76,7 @@ class Model(nn.Module):
         digit_log_probs = F.log_softmax(digit_logits, dim=1)
 
         # domain classification head
-        if self.lambd_grl > 0.0:
+        if lambd_grl > 0.0:
             rev_features = grad_reverse(features, lambd_grl)
         else:
             rev_features = features
@@ -81,64 +87,186 @@ class Model(nn.Module):
         return digit_log_probs, domain_log_probs
 
 
-def train(log_interval, model, device, train_loader, optimizer, epoch, dry_run):
+# -------------------------
+# Training loop (baseline + domain adaptation)
+# -------------------------
+
+def train(model,
+          device,
+          mnist_loader,
+          optimizer,
+          epoch,
+          log_interval=10,
+          use_domain_adaptation=False,
+          svhn_loader=None,
+          alpha=0.1,
+          lambd_grl=0.0,
+          dry_run=False):
+    """
+    use_domain_adaptation = False -> baseline, train on MNIST only
+    use_domain_adaptation = True  -> train on MNIST + SVHN (need svhn_loader)
+
+    alpha     -> weight for domain confusion loss (if GRL is OFF)
+    lambd_grl -> GRL strength; if > 0, use gradient reversal
+    """
     model.train()
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
+
+    if not use_domain_adaptation or svhn_loader is None:
+        # ---------- BASELINE: MNIST ONLY ----------
+        for batch_idx, (data, target) in enumerate(mnist_loader):
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+
+            digit_log_probs, _ = model(data, lambd_grl=0.0)
+            loss = F.nll_loss(digit_log_probs, target)
+
+            loss.backward()
+            optimizer.step()
+
+            if batch_idx % log_interval == 0:
+                print(
+                    f"Train Epoch: {epoch} "
+                    f"[{batch_idx * len(data)}/{len(mnist_loader.dataset)} "
+                    f"({100. * batch_idx / len(mnist_loader):.0f}%)]\t"
+                    f"Loss: {loss.item():.6f}"
+                )
+
+            if dry_run:
+                break
+        return
+
+    # ---------- DOMAIN ADAPTATION: MNIST + SVHN ----------
+    svhn_iter = iter(svhn_loader)
+
+    for batch_idx, (x_mnist, y_mnist) in enumerate(mnist_loader):
+        # get SVHN batch (loop around if needed)
+        try:
+            x_svhn, _ = next(svhn_iter)
+        except StopIteration:
+            svhn_iter = iter(svhn_loader)
+            x_svhn, _ = next(svhn_iter)
+
+        x_mnist, y_mnist = x_mnist.to(device), y_mnist.to(device)
+        x_svhn = x_svhn.to(device)
+
+        # combine MNIST + SVHN for domain classifier
+        x_all = torch.cat([x_mnist, x_svhn], dim=0)
+
+        # domain labels: MNIST = 0, SVHN = 1
+        domain_labels = torch.cat([
+            torch.zeros(len(x_mnist), dtype=torch.long),
+            torch.ones(len(x_svhn), dtype=torch.long)
+        ]).to(device)
+
         optimizer.zero_grad()
-        output = model(data)
-        loss = F.nll_loss(output, target)
+
+        # forward (GRL if lambd_grl > 0)
+        digit_log_probs, domain_log_probs = model(x_all, lambd_grl=lambd_grl)
+
+        # digit loss only on MNIST part
+        digit_log_probs_mnist = digit_log_probs[:len(x_mnist)]
+        loss_digit = F.nll_loss(digit_log_probs_mnist, y_mnist)
+
+        # domain loss on MNIST + SVHN
+        loss_domain = F.nll_loss(domain_log_probs, domain_labels)
+
+        # combine losses
+        if lambd_grl > 0.0:
+            # gradient reversal already flips gradient of domain head
+            loss = loss_digit + loss_domain
+        else:
+            # domain confusion: explicitly negate domain loss
+            loss = loss_digit - alpha * loss_domain
+
         loss.backward()
         optimizer.step()
+
         if batch_idx % log_interval == 0:
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
+            print(
+                f"Train Epoch: {epoch} "
+                f"[{batch_idx * len(x_mnist)}/{len(mnist_loader.dataset)} "
+                f"({100. * batch_idx / len(mnist_loader):.0f}%)]\t"
+                f"Digit Loss: {loss_digit.item():.6f}\t"
+                f"Domain Loss: {loss_domain.item():.6f}"
+            )
+
         if dry_run:
-            return
+            break
 
 
-def test(model, device, test_loader):
+# -------------------------
+# Evaluation (digit classification only)
+# -------------------------
+
+def test(model, device, test_loader, name="Test"):
     model.eval()
     test_loss = 0
     correct = 0
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            digit_log_probs, _ = model(data, lambd_grl=0.0)
+            test_loss += F.nll_loss(digit_log_probs, target, reduction='sum').item()
+            pred = digit_log_probs.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
     test_loss /= len(test_loader.dataset)
 
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+    print(
+        f'\n{name} set: Average loss: {test_loss:.4f}, '
+        f'Accuracy: {correct}/{len(test_loader.dataset)} '
+        f'({100. * correct / len(test_loader.dataset):.0f}%)\n'
+    )
 
 
-def train_stage1(model):
+# -------------------------
+# Stage 1 & Stage 2 helpers
+# -------------------------
+
+def train_stage1(model, device, mnist_train_loader, mnist_test_loader,
+                 lr, gamma, epochs, log_interval, dry_run):
+    print("=== Stage 1: Baseline MNIST training ===")
     optimizer = optim.Adadelta(model.parameters(), lr=lr)
-
     scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
+
     for epoch in range(1, epochs + 1):
-        train(log_interval, model, device, mnist_train_loader, optimizer, epoch, dry_run)
-        #test(model, device, mnist_test_loader)
+        train(model, device, mnist_train_loader, optimizer, epoch,
+              log_interval=log_interval,
+              use_domain_adaptation=False,
+              svhn_loader=None,
+              dry_run=dry_run)
+        test(model, device, mnist_test_loader, name="MNIST")
         scheduler.step()
 
     return model
 
-def train_stage2(model):
-    pass
-    # optimizer = optim.Adadelta(model.parameters(), lr=lr)
 
-    # scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
-    # for epoch in range(1, epochs + 1):
-    #     train(log_interval, model, device, mnist_train_loader, optimizer, epoch, dry_run)
-    #     #test(model, device, mnist_test_loader)
-    #     scheduler.step()
+def train_stage2(model, device, mnist_train_loader, svhn_train_loader,
+                 mnist_test_loader, svhn_test_loader,
+                 lr, gamma, epochs, log_interval, dry_run,
+                 use_grl=True, alpha=0.1, lambd_grl=1.0):
+    print("=== Stage 2: Domain adaptation MNIST ↔ SVHN ===")
+    optimizer = optim.Adadelta(model.parameters(), lr=lr)
+    scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
 
-    # return model
+    for epoch in range(1, epochs + 1):
+        train(model, device, mnist_train_loader, optimizer, epoch,
+              log_interval=log_interval,
+              use_domain_adaptation=True,
+              svhn_loader=svhn_train_loader,
+              alpha=alpha,
+              lambd_grl=lambd_grl if use_grl else 0.0,
+              dry_run=dry_run)
+        test(model, device, mnist_test_loader, name="MNIST")
+        test(model, device, svhn_test_loader, name="SVHN")
+        scheduler.step()
+
+    return model
+
+
+# -------------------------
+# Main
+# -------------------------
 
 if __name__ == '__main__':
     batch_size = 65
@@ -150,24 +278,65 @@ if __name__ == '__main__':
     device = "cpu"
     dry_run = True
 
-
-    transform=transforms.Compose([
+    # Transforms: resize to 32x32, 1 channel
+    mnist_transform = transforms.Compose([
+        transforms.Resize((32, 32)),
         transforms.ToTensor(),
-        torchvision.transforms.Resize([32, 32])
-        ])
+    ])
 
-    mnist_train = torchvision.datasets.MNIST(root="./data", train=True, download=DOWNLOAD_DATA, transform=transform)
-    mnist_train_loader = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, shuffle=True, num_workers=2)
+    svhn_transform = transforms.Compose([
+        transforms.Grayscale(num_output_channels=1),
+        transforms.Resize((32, 32)),
+        transforms.ToTensor(),
+    ])
 
-    mnist_test = torchvision.datasets.MNIST(root="./data", train=True, download=DOWNLOAD_DATA, transform=transform)
-    mnist_test_loader = torch.utils.data.DataLoader(mnist_train, batch_size=test_batch_size, shuffle=False, num_workers=2)
+    # MNIST
+    mnist_train = torchvision.datasets.MNIST(
+        root="./data", train=True, download=DOWNLOAD_DATA, transform=mnist_transform
+    )
+    mnist_train_loader = torch.utils.data.DataLoader(
+        mnist_train, batch_size=batch_size, shuffle=True, num_workers=2
+    )
 
-    base_model = Model(lambd_grl=0.0)
-    
-    train_stage1(base_model)
+    mnist_test = torchvision.datasets.MNIST(
+        root="./data", train=False, download=DOWNLOAD_DATA, transform=mnist_transform
+    )
+    mnist_test_loader = torch.utils.data.DataLoader(
+        mnist_test, batch_size=test_batch_size, shuffle=False, num_workers=2
+    )
 
-    #train_stage2(model)
+    # SVHN
+    svhn_train = torchvision.datasets.SVHN(
+        root="./data", split='train', download=DOWNLOAD_DATA, transform=svhn_transform
+    )
+    svhn_train_loader = torch.utils.data.DataLoader(
+        svhn_train, batch_size=batch_size, shuffle=True, num_workers=2
+    )
 
+    svhn_test = torchvision.datasets.SVHN(
+        root="./data", split='test', download=DOWNLOAD_DATA, transform=svhn_transform
+    )
+    svhn_test_loader = torch.utils.data.DataLoader(
+        svhn_test, batch_size=test_batch_size, shuffle=False, num_workers=2
+    )
 
+    # Model
+    base_model = Model().to(device)
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    # Stage 1: train only on MNIST
+    base_model = train_stage1(
+        base_model, device,
+        mnist_train_loader, mnist_test_loader,
+        lr, gamma, epochs, log_interval, dry_run
+    )
+
+    # Stage 2: domain adaptation (uncomment when ready)
+    # base_model = train_stage2(
+    #     base_model, device,
+    #     mnist_train_loader, svhn_train_loader,
+    #     mnist_test_loader, svhn_test_loader,
+    #     lr, gamma, epochs, log_interval, dry_run,
+    #     use_grl=True,   # set False to use confusion loss with -alpha * domain_loss
+    #     alpha=0.1,
+    #     lambd_grl=1.0
+    # )
