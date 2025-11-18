@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -277,6 +278,7 @@ if __name__ == '__main__':
     log_interval = 10
     device = "cpu"
     dry_run = True
+    checkpoint_path = "base_model.ckpt"
 
     # Transforms: resize to 32x32, 1 channel
     mnist_transform = transforms.Compose([
@@ -329,6 +331,20 @@ if __name__ == '__main__':
         mnist_train_loader, mnist_test_loader,
         lr, gamma, epochs, log_interval, dry_run
     )
+
+    if os.path.exists(checkpoint_path):
+        print("### Loading saved baseline MNIST model ###")
+        base_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    else:
+        print("### Training baseline MNIST model (Stage 1) ###")
+        base_model = train_stage1(
+            base_model, device,
+            mnist_train_loader, mnist_test_loader,
+            lr, gamma, epochs, log_interval, dry_run
+        )
+        print("### Saving baseline model checkpoint ###")
+        torch.save(base_model.state_dict(), checkpoint_path)
+
 
     # Stage 2: domain adaptation (uncomment when ready)
     # base_model = train_stage2(
