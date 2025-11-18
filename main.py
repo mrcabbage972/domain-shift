@@ -6,35 +6,80 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
+from torch.autograd import Function
 
 
 DOWNLOAD_DATA = True
 
+class GradReverse(Function):
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambd * grad_output, None  # reverse gradient
+
+def grad_reverse(x, lambd=1.0):
+    return GradReverse.apply(x, lambd)
+
 
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, lambd_grl):
         super(Model, self).__init__()
+        # shared feature extractor
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
         self.conv2 = nn.Conv2d(32, 64, 3, 1)
         self.dropout1 = nn.Dropout(0.25)
-        self.dropout2 = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(12544, 128)
-        self.fc2 = nn.Linear(128, 10)
 
-    def forward(self, x):
+        # 64 x 14 x 14 = 12544 after conv+pool
+        self.fc1 = nn.Linear(12544, 128)
+
+        # digit classifier head (10 classes)
+        self.fc_digit = nn.Linear(128, 10)
+
+        # domain classifier head (2 domains: 0 = MNIST, 1 = SVHN)
+        self.fc_domain = nn.Linear(128, 2)
+
+        self.dropout2 = nn.Dropout(0.5)
+
+        self.lambd_grl = lambd_grl 
+
+    def extract_features(self, x):
         x = self.conv1(x)
         x = F.relu(x)
         x = self.conv2(x)
         x = F.relu(x)
         x = F.max_pool2d(x, 2)
         x = self.dropout1(x)
-        x = torch.flatten(x, 1)
-        x = self.fc1(x)
+        x = torch.flatten(x, 1)           # [B, 12544]
+        x = self.fc1(x)                   # [B, 128]
         x = F.relu(x)
-        x = self.dropout2(x)
-        x = self.fc2(x)
-        output = F.log_softmax(x, dim=1)
-        return output
+        return x
+
+    def forward(self, x):
+        """
+        lambd_grl = 0.0  → no gradient reversal (baseline / simple domain confusion by -loss)
+        lambd_grl > 0.0  → use gradient reversal for the domain head
+        """
+        features = self.extract_features(x)       # shared features [B, 128]
+
+        # digit classification head
+        digit_logits = self.fc_digit(self.dropout2(features))
+        digit_log_probs = F.log_softmax(digit_logits, dim=1)
+
+        # domain classification head
+        if self.lambd_grl > 0.0:
+            rev_features = grad_reverse(features, lambd_grl)
+        else:
+            rev_features = features
+
+        domain_logits = self.fc_domain(rev_features)
+        domain_log_probs = F.log_softmax(domain_logits, dim=1)
+
+        return digit_log_probs, domain_log_probs
+
 
 def train(log_interval, model, device, train_loader, optimizer, epoch, dry_run):
     model.train()
@@ -115,13 +160,13 @@ if __name__ == '__main__':
     mnist_train_loader = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, shuffle=True, num_workers=2)
 
     mnist_test = torchvision.datasets.MNIST(root="./data", train=True, download=DOWNLOAD_DATA, transform=transform)
-    mnist_test_loader = torch.utils.data.DataLoader(mnist_train, batch_size=test_batch_size, shuffle=True, num_workers=2)
+    mnist_test_loader = torch.utils.data.DataLoader(mnist_train, batch_size=test_batch_size, shuffle=False, num_workers=2)
 
-    model = Model()
+    base_model = Model(lambd_grl=0.0)
     
-    train_stage1(model)
+    train_stage1(base_model)
 
-    train_stage2(model)
+    #train_stage2(model)
 
 
 
