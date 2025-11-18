@@ -350,5 +350,5 @@ if __name__ == '__main__':
         lr, gamma, epochs, log_interval, dry_run,
         use_grl=True,   # set False to use confusion loss with -alpha * domain_loss
         alpha=0.1,
-        lambd_grl=np.log(10) / np.log(2.0)
+        lambd_grl=0.1, #np.log(10) / np.log(2.0)
     )
