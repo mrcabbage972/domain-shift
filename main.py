@@ -36,7 +36,7 @@ class Model(nn.Module):
         output = F.log_softmax(x, dim=1)
         return output
 
-def train(log_interval, model, device, train_loader, optimizer, epoch):
+def train(log_interval, model, device, train_loader, optimizer, epoch, dry_run):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
@@ -49,6 +49,8 @@ def train(log_interval, model, device, train_loader, optimizer, epoch):
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.dataset),
                 100. * batch_idx / len(train_loader), loss.item()))
+        if dry_run:
+            return
 
 
 def test(model, device, test_loader):
@@ -69,13 +71,39 @@ def test(model, device, test_loader):
         test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
 
+
+def train_stage1(model):
+    optimizer = optim.Adadelta(model.parameters(), lr=lr)
+
+    scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
+    for epoch in range(1, epochs + 1):
+        train(log_interval, model, device, mnist_train_loader, optimizer, epoch, dry_run)
+        #test(model, device, mnist_test_loader)
+        scheduler.step()
+
+    return model
+
+def train_stage2(model):
+    pass
+    # optimizer = optim.Adadelta(model.parameters(), lr=lr)
+
+    # scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
+    # for epoch in range(1, epochs + 1):
+    #     train(log_interval, model, device, mnist_train_loader, optimizer, epoch, dry_run)
+    #     #test(model, device, mnist_test_loader)
+    #     scheduler.step()
+
+    # return model
+
 if __name__ == '__main__':
     batch_size = 65
-    epochs = 15
+    test_batch_size = 1000
+    epochs = 1
     lr = 1.0
     gamma = 0.7
     log_interval = 10
     device = "cpu"
+    dry_run = True
 
 
     transform=transforms.Compose([
@@ -87,16 +115,13 @@ if __name__ == '__main__':
     mnist_train_loader = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, shuffle=True, num_workers=2)
 
     mnist_test = torchvision.datasets.MNIST(root="./data", train=True, download=DOWNLOAD_DATA, transform=transform)
-    mnist_test_loader = torch.utils.data.DataLoader(mnist_train, batch_size=batch_size, shuffle=True, num_workers=2)
+    mnist_test_loader = torch.utils.data.DataLoader(mnist_train, batch_size=test_batch_size, shuffle=True, num_workers=2)
 
     model = Model()
-    optimizer = optim.Adadelta(model.parameters(), lr=lr)
+    
+    train_stage1(model)
 
-    scheduler = StepLR(optimizer, step_size=1, gamma=gamma)
-    for epoch in range(1, epochs + 1):
-        train(log_interval, model, device, mnist_train_loader, optimizer, epoch)
-        test(model, device, mnist_test_loader)
-        scheduler.step()
+    train_stage2(model)
 
 
 
