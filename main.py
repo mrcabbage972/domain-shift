@@ -326,13 +326,6 @@ if __name__ == '__main__':
     # Model
     base_model = Model().to(device)
 
-    # Stage 1: train only on MNIST
-    base_model = train_stage1(
-        base_model, device,
-        mnist_train_loader, mnist_test_loader,
-        lr, gamma, epochs, log_interval, dry_run
-    )
-
     if os.path.exists(checkpoint_path):
         print("### Loading saved baseline MNIST model ###")
         base_model.load_state_dict(torch.load(checkpoint_path, map_location=device))
