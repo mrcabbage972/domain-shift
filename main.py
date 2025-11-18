@@ -273,7 +273,7 @@ def train_stage2(model, device, mnist_train_loader, svhn_train_loader,
 if __name__ == '__main__':
     batch_size = 65
     test_batch_size = 1000
-    epochs = 1
+    epochs = 5
     lr = 1.0
     gamma = 0.7
     log_interval = 10
@@ -346,6 +346,8 @@ if __name__ == '__main__':
         print("### Saving baseline model checkpoint ###")
         torch.save(base_model.state_dict(), checkpoint_path)
 
+    test(base_model, device, mnist_test_loader, name="MNIST")
+    test(base_model, device, svhn_test_loader, name="SVHN")
 
     # Stage 2: domain adaptation (uncomment when ready)
     base_model = train_stage2(
