@@ -103,6 +103,7 @@ def train(model,
           svhn_loader=None,
           alpha=0.1,
           lambd_grl=0.0,
+          beta=0.1,
           dry_run=False):
     """
     use_domain_adaptation = False -> baseline, train on MNIST only
@@ -175,7 +176,7 @@ def train(model,
         # combine losses
         if lambd_grl > 0.0:
             # gradient reversal already flips gradient of domain head
-            loss = loss_digit + loss_domain
+            loss = loss_digit + beta * loss_domain
         else:
             # domain confusion: explicitly negate domain loss
             loss = loss_digit - alpha * loss_domain
@@ -258,6 +259,7 @@ def train_stage2(model, device, mnist_train_loader, svhn_train_loader,
               svhn_loader=svhn_train_loader,
               alpha=alpha,
               lambd_grl=lambd_grl if use_grl else 0.0,
+              beta=0.1,
               dry_run=dry_run)
         test(model, device, mnist_test_loader, name="MNIST")
         test(model, device, svhn_test_loader, name="SVHN")
@@ -273,12 +275,13 @@ def train_stage2(model, device, mnist_train_loader, svhn_train_loader,
 if __name__ == '__main__':
     batch_size = 65
     test_batch_size = 1000
-    epochs = 5
+    epochs = 1
+    epochs2 = 5
     lr = 1.0
     gamma = 0.7
     log_interval = 10
     device = "cpu"
-    dry_run = True
+    dry_run = False
     checkpoint_path = "base_model.ckpt"
 
     # Transforms: resize to 32x32, 1 channel
@@ -347,8 +350,8 @@ if __name__ == '__main__':
         base_model, device,
         mnist_train_loader, svhn_train_loader,
         mnist_test_loader, svhn_test_loader,
-        lr, gamma, epochs, log_interval, dry_run,
+        lr, gamma, epochs2, log_interval, dry_run,
         use_grl=True,   # set False to use confusion loss with -alpha * domain_loss
-        alpha=0.1,
-        lambd_grl=0.1, #np.log(10) / np.log(2.0)
+        alpha=np.log(10) / np.log(2.0),
+        lambd_grl=0.1, #
     )
