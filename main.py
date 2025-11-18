@@ -111,6 +111,7 @@ def train(model,
 
     alpha     -> weight for domain confusion loss (if GRL is OFF)
     lambd_grl -> GRL strength; if > 0, use gradient reversal
+    beta      -> weight for domain loss (GRL case)
     """
     model.train()
 
@@ -170,15 +171,26 @@ def train(model,
         digit_log_probs_mnist = digit_log_probs[:len(x_mnist)]
         loss_digit = F.nll_loss(digit_log_probs_mnist, y_mnist)
 
-        # domain loss on MNIST + SVHN
-        loss_domain = F.nll_loss(domain_log_probs, domain_labels)
+        # split domain predictions / labels by domain
+        domain_log_probs_mnist = domain_log_probs[:len(x_mnist)]
+        domain_log_probs_svhn = domain_log_probs[len(x_mnist):]
+
+        domain_labels_mnist = domain_labels[:len(x_mnist)]
+        domain_labels_svhn = domain_labels[len(x_mnist):]
+
+        # domain loss per-domain
+        loss_domain_mnist = F.nll_loss(domain_log_probs_mnist, domain_labels_mnist)
+        loss_domain_svhn = F.nll_loss(domain_log_probs_svhn, domain_labels_svhn)
+
+        # combined domain loss (they have same batch size; mean of the two)
+        loss_domain = 0.5 * (loss_domain_mnist + loss_domain_svhn)
 
         # combine losses
         if lambd_grl > 0.0:
-            # gradient reversal already flips gradient of domain head
+            # GRL case: domain loss is adversarial via GRL, scaled by beta
             loss = loss_digit + beta * loss_domain
         else:
-            # domain confusion: explicitly negate domain loss
+            # domain confusion (no GRL): explicitly negate domain loss
             loss = loss_digit - alpha * loss_domain
 
         loss.backward()
@@ -189,13 +201,18 @@ def train(model,
                 f"Train Epoch: {epoch} "
                 f"[{batch_idx * len(x_mnist)}/{len(mnist_loader.dataset)} "
                 f"({100. * batch_idx / len(mnist_loader):.0f}%)]\t"
-                f"Digit Loss: {loss_digit.item():.6f}\t"
-                f"Domain Loss: {loss_domain.item():.6f}"
+                f"Digit Loss (MNIST): {loss_digit.item():.6f}\t"
+                f"Domain Loss MNIST: {loss_domain_mnist.item():.6f}\t"
+                f"Domain Loss SVHN: {loss_domain_svhn.item():.6f}"
             )
+
+        if batch_idx % 2000 == 0:   # every ~2000 MNIST batches (~3–4% of epoch)
+            print("Quick SVHN check:")
+            test(model, device, svhn_test_loader, name="SVHN (quick)")
+
 
         if dry_run:
             break
-
 
 # -------------------------
 # Evaluation (digit classification only)
@@ -278,6 +295,7 @@ if __name__ == '__main__':
     epochs = 1
     epochs2 = 5
     lr = 1.0
+    lr2=2e-4
     gamma = 0.7
     log_interval = 10
     device = "cpu"
@@ -342,15 +360,15 @@ if __name__ == '__main__':
         print("### Saving baseline model checkpoint ###")
         torch.save(base_model.state_dict(), checkpoint_path)
 
-    test(base_model, device, mnist_test_loader, name="MNIST")
-    test(base_model, device, svhn_test_loader, name="SVHN")
+    #test(base_model, device, mnist_test_loader, name="MNIST")
+    #test(base_model, device, svhn_test_loader, name="SVHN")
 
     # Stage 2: domain adaptation (uncomment when ready)
     base_model = train_stage2(
         base_model, device,
         mnist_train_loader, svhn_train_loader,
         mnist_test_loader, svhn_test_loader,
-        lr, gamma, epochs2, log_interval, dry_run,
+        lr2, gamma, epochs2, log_interval, dry_run,
         use_grl=True,   # set False to use confusion loss with -alpha * domain_loss
         alpha=np.log(10) / np.log(2.0),
         lambd_grl=0.1, #
