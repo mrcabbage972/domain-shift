@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -347,12 +348,12 @@ if __name__ == '__main__':
 
 
     # Stage 2: domain adaptation (uncomment when ready)
-    # base_model = train_stage2(
-    #     base_model, device,
-    #     mnist_train_loader, svhn_train_loader,
-    #     mnist_test_loader, svhn_test_loader,
-    #     lr, gamma, epochs, log_interval, dry_run,
-    #     use_grl=True,   # set False to use confusion loss with -alpha * domain_loss
-    #     alpha=0.1,
-    #     lambd_grl=1.0
-    # )
+    base_model = train_stage2(
+        base_model, device,
+        mnist_train_loader, svhn_train_loader,
+        mnist_test_loader, svhn_test_loader,
+        lr, gamma, epochs, log_interval, dry_run,
+        use_grl=True,   # set False to use confusion loss with -alpha * domain_loss
+        alpha=0.1,
+        lambd_grl=np.log(10) / np.log(2.0)
+    )
